@@ -4,6 +4,7 @@
 #include <sys/param.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 #include "esp_system.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -21,7 +22,7 @@
 
 static const char *TCP_TAG = "tcp-server";
 
-static void do_retransmit(const int sock)
+static void do_retransmit(QueueHandle_t globalQueueHandle, const int sock)
 {
     int len;
     char rx_buffer[128];
@@ -44,6 +45,18 @@ static void do_retransmit(const int sock)
         rx_buffer[len] = 0; // Null-terminate whatever is received and treat it like a string
         ESP_LOGI(TCP_TAG, "Received %d bytes: %s", len, rx_buffer);
 
+        // --------- USER Code before retransmit --------- //
+        
+        char firstChar  = rx_buffer[0];
+        int valueToSend = firstChar == 'Y' ? 1 : 0;
+
+        ESP_LOGI(TCP_TAG, "Sending data to queue: %d", valueToSend);
+        if (!xQueueSend(globalQueueHandle, &valueToSend, 1000)) {
+            ESP_LOGI(TCP_TAG, "Failed to send data to queue");
+        }
+
+        // --------- END USER Code after retransmi------- //
+
         // send() can return less bytes than supplied length.
         // Walk-around for robust implementation.
         int to_write = len;
@@ -62,8 +75,11 @@ static void do_retransmit(const int sock)
 
 void tcp_server_task(void *pvParameters)
 {
+    // Extract parameter
+    QueueHandle_t globalQueueHandle = *(QueueHandle_t *) pvParameters;
+
     char addr_str[128];
-    int addr_family = (int)pvParameters;
+    int addr_family = AF_INET;
     int ip_protocol = 0;
     int keepAlive = 1;
     int keepIdle = KEEPALIVE_IDLE;
@@ -71,14 +87,11 @@ void tcp_server_task(void *pvParameters)
     int keepCount = KEEPALIVE_COUNT;
     struct sockaddr_storage dest_addr;
 
-    if (addr_family == AF_INET)
-    {
-        struct sockaddr_in *dest_addr_ip4 = (struct sockaddr_in *)&dest_addr;
-        dest_addr_ip4->sin_addr.s_addr = htonl(INADDR_ANY);
-        dest_addr_ip4->sin_family = AF_INET;
-        dest_addr_ip4->sin_port = htons(PORT);
-        ip_protocol = IPPROTO_IP;
-    }
+    struct sockaddr_in *dest_addr_ip4 = (struct sockaddr_in *)&dest_addr;
+    dest_addr_ip4->sin_addr.s_addr = htonl(INADDR_ANY);
+    dest_addr_ip4->sin_family = AF_INET;
+    dest_addr_ip4->sin_port = htons(PORT);
+    ip_protocol = IPPROTO_IP;
 
     int listen_sock = socket(addr_family, SOCK_STREAM, ip_protocol);
     if (listen_sock < 0)
@@ -136,7 +149,7 @@ void tcp_server_task(void *pvParameters)
 
         ESP_LOGI(TCP_TAG, "Socket accepted ip address: %s", addr_str);
 
-        do_retransmit(sock);
+        do_retransmit(globalQueueHandle, sock);
 
         shutdown(sock, 0);
         close(sock);
